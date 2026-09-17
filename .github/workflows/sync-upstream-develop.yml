@@ -92,12 +92,12 @@ jobs:
         if: steps.check.outputs.behind != '0' && steps.merge.outputs.conflict == 'false'
         run: |
           git push --force-with-lease origin "$SYNC_BRANCH"
-          existing=$(gh pr list --head "$SYNC_BRANCH" --state open --json number --jq '.[0].number // empty')
+          existing=$(gh pr list -R "$GITHUB_REPOSITORY" --head "$SYNC_BRANCH" --state open --json number --jq '.[0].number // empty')
           if [ -n "$existing" ]; then
             echo "PR #$existing already open; branch updated."
-            gh pr comment "$existing" --body-file /tmp/report.md
+            gh pr comment -R "$GITHUB_REPOSITORY" "$existing" --body-file /tmp/report.md
           else
-            gh pr create \
+            gh pr create -R "$GITHUB_REPOSITORY" \
               --base "${{ steps.merge.outputs.base }}" \
               --head "$SYNC_BRANCH" \
               --title "Sync upstream develop ($(date -u +%Y-%m-%d))" \
@@ -111,7 +111,7 @@ jobs:
           # Match on the plain issue list, not --search: the search index is eventually
           # consistent, so a freshly opened issue is briefly invisible and the job would
           # open a duplicate on the next run.
-          existing=$(gh issue list --state open --limit 100 --json number,title --jq "[.[] | select(.title==\"$title\")] | .[0].number // empty")
+          existing=$(gh issue list -R "$GITHUB_REPOSITORY" --state open --limit 100 --json number,title --jq "[.[] | select(.title==\"$title\")] | .[0].number // empty")
           {
             echo "The weekly sync with \`upstream/$UPSTREAM_BRANCH\` could not merge cleanly."
             echo "Nothing was changed. Resolve it by hand:"
@@ -131,11 +131,11 @@ jobs:
           } > /tmp/issue.md
           if [ -n "$existing" ]; then
             echo "Issue #$existing already open; adding a comment."
-            gh issue comment "$existing" --body-file /tmp/issue.md
+            gh issue comment -R "$GITHUB_REPOSITORY" "$existing" --body-file /tmp/issue.md
           else
             # gh issue create uses GraphQL, which the Actions token cannot use to
             # create issues on a fork. Try REST, and fall back to failing loudly.
-            if ! gh api -X POST "repos/${GITHUB_REPOSITORY}/issues"                  -f title="$title" -F body=@/tmp/issue.md --jq '.html_url'; then
+            if ! gh api -X POST "repos/${GITHUB_REPOSITORY}/issues" -f title="$title" -F body=@/tmp/issue.md --jq '.html_url'; then
               echo "::error::Upstream develop no longer merges cleanly and this token cannot open an issue. See the job summary."
               cat /tmp/issue.md >> "$GITHUB_STEP_SUMMARY"
               exit 1
