@@ -130,7 +130,13 @@ jobs:
             echo "Issue #$existing already open; adding a comment."
             gh issue comment "$existing" --body-file /tmp/issue.md
           else
-            gh issue create --title "$title" --body-file /tmp/issue.md
+            # gh issue create uses GraphQL, which the Actions token cannot use to
+            # create issues on a fork. Try REST, and fall back to failing loudly.
+            if ! gh api -X POST "repos/${GITHUB_REPOSITORY}/issues"                  -f title="$title" -F body=@/tmp/issue.md --jq '.html_url'; then
+              echo "::error::Upstream develop no longer merges cleanly and this token cannot open an issue. See the job summary."
+              cat /tmp/issue.md >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
           fi
 
       - name: Nothing to do
