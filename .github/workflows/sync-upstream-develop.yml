@@ -108,7 +108,10 @@ jobs:
         if: steps.check.outputs.behind != '0' && steps.merge.outputs.conflict == 'true'
         run: |
           title="Upstream develop sync needs manual attention"
-          existing=$(gh issue list --state open --search "$title in:title" --json number --jq '.[0].number // empty')
+          # Match on the plain issue list, not --search: the search index is eventually
+          # consistent, so a freshly opened issue is briefly invisible and the job would
+          # open a duplicate on the next run.
+          existing=$(gh issue list --state open --limit 100 --json number,title --jq "[.[] | select(.title==\"$title\")] | .[0].number // empty")
           {
             echo "The weekly sync with \`upstream/$UPSTREAM_BRANCH\` could not merge cleanly."
             echo "Nothing was changed. Resolve it by hand:"
