@@ -1,0 +1,138 @@
+name: Sync upstream develop
+
+# Weekly re-alignment of this fork with swizzin/swizzin `develop`.
+#
+# On a clean merge it opens a pull request against master. It deliberately does
+# NOT push to master: /etc/swizzin on the NAS tracks this fork's master, and
+# `box update` runs `git reset --hard origin/master`, so anything landing on
+# master reaches production unreviewed.
+#
+# On a conflict it opens an issue instead and changes nothing.
+
+on:
+  schedule:
+    # Mondays, 04:17 UTC
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: sync-upstream-develop
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    env:
+      UPSTREAM_URL: https://github.com/swizzin/swizzin.git
+      UPSTREAM_BRANCH: develop
+      SYNC_BRANCH: sync/upstream-develop
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream "$UPSTREAM_URL" 2>/dev/null || git remote set-url upstream "$UPSTREAM_URL"
+          git fetch --no-tags upstream "$UPSTREAM_BRANCH"
+
+      - name: Count incoming commits
+        id: check
+        run: |
+          behind=$(git rev-list --count "HEAD..upstream/$UPSTREAM_BRANCH")
+          echo "behind=$behind" >> "$GITHUB_OUTPUT"
+          echo "Fork is $behind commit(s) behind upstream/$UPSTREAM_BRANCH."
+
+      - name: Attempt the merge
+        id: merge
+        if: steps.check.outputs.behind != '0'
+        run: |
+          base=$(git rev-parse --abbrev-ref HEAD)
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          git checkout -B "$SYNC_BRANCH"
+          if git merge --no-edit "upstream/$UPSTREAM_BRANCH"; then
+            echo "conflict=false" >> "$GITHUB_OUTPUT"
+          else
+            git diff --name-only --diff-filter=U > /tmp/conflicts.txt || true
+            git merge --abort || true
+            echo "conflict=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build the report
+        id: report
+        if: steps.check.outputs.behind != '0'
+        run: |
+          {
+            echo "### Incoming commits (${{ steps.check.outputs.behind }})"
+            echo
+            git log --no-merges --pretty='- %h %s' "HEAD..upstream/$UPSTREAM_BRANCH" | head -50
+            echo
+            echo "### Files where this fork diverges from upstream"
+            echo
+            echo "Review these first -- a sync can silently revert a local fix."
+            echo '```'
+            git diff --name-only "upstream/$UPSTREAM_BRANCH" "${{ steps.merge.outputs.base }}" | head -50
+            echo '```'
+          } > /tmp/report.md
+          cat /tmp/report.md
+
+      - name: Push the sync branch and open a PR
+        if: steps.check.outputs.behind != '0' && steps.merge.outputs.conflict == 'false'
+        run: |
+          git push --force-with-lease origin "$SYNC_BRANCH"
+          existing=$(gh pr list --head "$SYNC_BRANCH" --state open --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            echo "PR #$existing already open; branch updated."
+            gh pr comment "$existing" --body-file /tmp/report.md
+          else
+            gh pr create \
+              --base "${{ steps.merge.outputs.base }}" \
+              --head "$SYNC_BRANCH" \
+              --title "Sync upstream develop ($(date -u +%Y-%m-%d))" \
+              --body-file /tmp/report.md
+          fi
+
+      - name: Open an issue when the merge conflicts
+        if: steps.check.outputs.behind != '0' && steps.merge.outputs.conflict == 'true'
+        run: |
+          title="Upstream develop sync needs manual attention"
+          existing=$(gh issue list --state open --search "$title in:title" --json number --jq '.[0].number // empty')
+          {
+            echo "The weekly sync with \`upstream/$UPSTREAM_BRANCH\` could not merge cleanly."
+            echo "Nothing was changed. Resolve it by hand:"
+            echo
+            echo '```bash'
+            echo "git fetch upstream $UPSTREAM_BRANCH"
+            echo "git checkout -B $SYNC_BRANCH ${{ steps.merge.outputs.base }}"
+            echo "git merge upstream/$UPSTREAM_BRANCH"
+            echo '```'
+            echo
+            echo "### Conflicting files"
+            echo '```'
+            cat /tmp/conflicts.txt 2>/dev/null || echo "(none captured)"
+            echo '```'
+            echo
+            cat /tmp/report.md
+          } > /tmp/issue.md
+          if [ -n "$existing" ]; then
+            echo "Issue #$existing already open; adding a comment."
+            gh issue comment "$existing" --body-file /tmp/issue.md
+          else
+            gh issue create --title "$title" --body-file /tmp/issue.md
+          fi
+
+      - name: Nothing to do
+        if: steps.check.outputs.behind == '0'
+        run: echo "Already level with upstream/$UPSTREAM_BRANCH."
